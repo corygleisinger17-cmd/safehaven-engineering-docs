@@ -1,0 +1,782 @@
+begin;
+
+-- ============================================================
+-- SAFEHAVEN MIGRATION 009
+-- Row-Level Security Authorization Framework
+-- ============================================================
+
+
+-- ============================================================
+-- 1. AUTHORIZATION HELPER FUNCTIONS
+-- ============================================================
+
+create or replace function public.is_household_member(
+  p_household_id uuid
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (
+    select 1
+    from public.household_members hm
+    where hm.household_id = p_household_id
+      and hm.user_id = (select auth.uid())
+      and hm.invite_status = 'accepted'
+  );
+$$;
+
+
+create or replace function public.is_household_owner(
+  p_household_id uuid
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (
+    select 1
+    from public.households h
+    where h.household_id = p_household_id
+      and h.owner_user_id = (select auth.uid())
+  );
+$$;
+
+
+create or replace function public.is_property_member(
+  p_property_id uuid
+)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (
+    select 1
+    from public.properties p
+    where p.property_id = p_property_id
+      and public.is_household_member(p.household_id)
+  );
+$$;
+
+
+-- Prevent anonymous/public users from calling authorization helpers.
+revoke all on function public.is_household_member(uuid) from public;
+revoke all on function public.is_household_owner(uuid) from public;
+revoke all on function public.is_property_member(uuid) from public;
+
+grant execute on function public.is_household_member(uuid) to authenticated;
+grant execute on function public.is_household_owner(uuid) to authenticated;
+grant execute on function public.is_property_member(uuid) to authenticated;
+
+
+-- ============================================================
+-- 2. PROFILES
+-- ============================================================
+
+drop policy if exists "Users can insert own profile"
+  on public.profiles;
+
+drop policy if exists "Users can read own profile"
+  on public.profiles;
+
+drop policy if exists "Users can update own profile"
+  on public.profiles;
+
+drop policy if exists "Users can delete own profile"
+  on public.profiles;
+
+
+create policy "Users can insert own profile"
+on public.profiles
+for insert
+to authenticated
+with check (
+  profile_id = (select auth.uid())
+);
+
+
+create policy "Users can read own profile"
+on public.profiles
+for select
+to authenticated
+using (
+  profile_id = (select auth.uid())
+);
+
+
+create policy "Users can update own profile"
+on public.profiles
+for update
+to authenticated
+using (
+  profile_id = (select auth.uid())
+)
+with check (
+  profile_id = (select auth.uid())
+);
+
+
+create policy "Users can delete own profile"
+on public.profiles
+for delete
+to authenticated
+using (
+  profile_id = (select auth.uid())
+);
+
+
+-- ============================================================
+-- 3. HOUSEHOLDS
+-- ============================================================
+
+drop policy if exists "Users can create households"
+  on public.households;
+
+drop policy if exists "Members can read households"
+  on public.households;
+
+drop policy if exists "Owners can update households"
+  on public.households;
+
+drop policy if exists "Owners can delete households"
+  on public.households;
+
+
+create policy "Users can create households"
+on public.households
+for insert
+to authenticated
+with check (
+  owner_user_id = (select auth.uid())
+);
+
+
+create policy "Members can read households"
+on public.households
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+  or owner_user_id = (select auth.uid())
+);
+
+
+create policy "Owners can update households"
+on public.households
+for update
+to authenticated
+using (
+  owner_user_id = (select auth.uid())
+)
+with check (
+  owner_user_id = (select auth.uid())
+);
+
+
+create policy "Owners can delete households"
+on public.households
+for delete
+to authenticated
+using (
+  owner_user_id = (select auth.uid())
+);
+
+
+-- ============================================================
+-- 4. HOUSEHOLD MEMBERS
+-- ============================================================
+
+drop policy if exists "Users can create own household membership"
+  on public.household_members;
+
+drop policy if exists "Members can read household memberships"
+  on public.household_members;
+
+drop policy if exists "Owners can add household members"
+  on public.household_members;
+
+drop policy if exists "Owners can update household members"
+  on public.household_members;
+
+drop policy if exists "Owners or members can delete memberships"
+  on public.household_members;
+
+
+create policy "Members can read household memberships"
+on public.household_members
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+  or user_id = (select auth.uid())
+);
+
+
+create policy "Owners can add household members"
+on public.household_members
+for insert
+to authenticated
+with check (
+  public.is_household_owner(household_id)
+  or user_id = (select auth.uid())
+);
+
+
+create policy "Owners can update household members"
+on public.household_members
+for update
+to authenticated
+using (
+  public.is_household_owner(household_id)
+)
+with check (
+  public.is_household_owner(household_id)
+);
+
+
+create policy "Owners or members can delete memberships"
+on public.household_members
+for delete
+to authenticated
+using (
+  public.is_household_owner(household_id)
+  or user_id = (select auth.uid())
+);
+
+
+-- ============================================================
+-- 5. PROPERTIES
+-- ============================================================
+
+drop policy if exists "Members can read properties"
+  on public.properties;
+
+drop policy if exists "Members can create properties"
+  on public.properties;
+
+drop policy if exists "Members can update properties"
+  on public.properties;
+
+drop policy if exists "Owners can delete properties"
+  on public.properties;
+
+
+create policy "Members can read properties"
+on public.properties
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create properties"
+on public.properties
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can update properties"
+on public.properties
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Owners can delete properties"
+on public.properties
+for delete
+to authenticated
+using (
+  public.is_household_owner(household_id)
+);
+
+
+-- ============================================================
+-- 6. ROOMS
+-- ============================================================
+
+drop policy if exists "Members can read rooms"
+  on public.rooms;
+
+drop policy if exists "Members can create rooms"
+  on public.rooms;
+
+drop policy if exists "Members can update rooms"
+  on public.rooms;
+
+drop policy if exists "Members can delete rooms"
+  on public.rooms;
+
+
+create policy "Members can read rooms"
+on public.rooms
+for select
+to authenticated
+using (
+  public.is_property_member(property_id)
+);
+
+
+create policy "Members can create rooms"
+on public.rooms
+for insert
+to authenticated
+with check (
+  public.is_property_member(property_id)
+);
+
+
+create policy "Members can update rooms"
+on public.rooms
+for update
+to authenticated
+using (
+  public.is_property_member(property_id)
+)
+with check (
+  public.is_property_member(property_id)
+);
+
+
+create policy "Members can delete rooms"
+on public.rooms
+for delete
+to authenticated
+using (
+  public.is_property_member(property_id)
+);
+
+
+-- ============================================================
+-- 7. ITEMS
+-- ============================================================
+
+drop policy if exists "Members can read items"
+  on public.items;
+
+drop policy if exists "Members can create items"
+  on public.items;
+
+drop policy if exists "Members can update items"
+  on public.items;
+
+drop policy if exists "Members can delete items"
+  on public.items;
+
+
+create policy "Members can read items"
+on public.items
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create items"
+on public.items
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+  and public.is_property_member(property_id)
+);
+
+
+create policy "Members can update items"
+on public.items
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+  and public.is_property_member(property_id)
+);
+
+
+create policy "Members can delete items"
+on public.items
+for delete
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 8. DOCUMENTS
+-- ============================================================
+
+drop policy if exists "Members can read documents"
+  on public.documents;
+
+drop policy if exists "Members can create documents"
+  on public.documents;
+
+drop policy if exists "Members can update documents"
+  on public.documents;
+
+drop policy if exists "Members can delete documents"
+  on public.documents;
+
+
+create policy "Members can read documents"
+on public.documents
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create documents"
+on public.documents
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can update documents"
+on public.documents
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can delete documents"
+on public.documents
+for delete
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 9. REMINDERS
+-- ============================================================
+
+drop policy if exists "Members can read reminders"
+  on public.reminders;
+
+drop policy if exists "Members can create reminders"
+  on public.reminders;
+
+drop policy if exists "Members can update reminders"
+  on public.reminders;
+
+drop policy if exists "Members can delete reminders"
+  on public.reminders;
+
+
+create policy "Members can read reminders"
+on public.reminders
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create reminders"
+on public.reminders
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can update reminders"
+on public.reminders
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can delete reminders"
+on public.reminders
+for delete
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 10. MAINTENANCE HISTORY
+-- ============================================================
+
+drop policy if exists "Members can read maintenance history"
+  on public.maintenance_history;
+
+drop policy if exists "Members can create maintenance history"
+  on public.maintenance_history;
+
+drop policy if exists "Members can update maintenance history"
+  on public.maintenance_history;
+
+drop policy if exists "Members can delete maintenance history"
+  on public.maintenance_history;
+
+
+create policy "Members can read maintenance history"
+on public.maintenance_history
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create maintenance history"
+on public.maintenance_history
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can update maintenance history"
+on public.maintenance_history
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can delete maintenance history"
+on public.maintenance_history
+for delete
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 11. AI INSIGHTS
+-- ============================================================
+
+drop policy if exists "Members can read AI insights"
+  on public.ai_insights;
+
+drop policy if exists "Members can create AI insights"
+  on public.ai_insights;
+
+drop policy if exists "Members can update AI insights"
+  on public.ai_insights;
+
+drop policy if exists "Members can delete AI insights"
+  on public.ai_insights;
+
+
+create policy "Members can read AI insights"
+on public.ai_insights
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create AI insights"
+on public.ai_insights
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can update AI insights"
+on public.ai_insights
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can delete AI insights"
+on public.ai_insights
+for delete
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 12. SEARCH HISTORY
+-- Search history is private to the user who created it.
+-- ============================================================
+
+drop policy if exists "Users can read own search history"
+  on public.search_history;
+
+drop policy if exists "Users can create own search history"
+  on public.search_history;
+
+drop policy if exists "Users can update own search history"
+  on public.search_history;
+
+drop policy if exists "Users can delete own search history"
+  on public.search_history;
+
+
+create policy "Users can read own search history"
+on public.search_history
+for select
+to authenticated
+using (
+  user_id = (select auth.uid())
+  and public.is_household_member(household_id)
+);
+
+
+create policy "Users can create own search history"
+on public.search_history
+for insert
+to authenticated
+with check (
+  user_id = (select auth.uid())
+  and public.is_household_member(household_id)
+);
+
+
+create policy "Users can update own search history"
+on public.search_history
+for update
+to authenticated
+using (
+  user_id = (select auth.uid())
+  and public.is_household_member(household_id)
+)
+with check (
+  user_id = (select auth.uid())
+  and public.is_household_member(household_id)
+);
+
+
+create policy "Users can delete own search history"
+on public.search_history
+for delete
+to authenticated
+using (
+  user_id = (select auth.uid())
+  and public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 13. SETUP WIZARD PROGRESS
+-- ============================================================
+
+drop policy if exists "Members can read setup progress"
+  on public.setup_wizard_progress;
+
+drop policy if exists "Members can create setup progress"
+  on public.setup_wizard_progress;
+
+drop policy if exists "Members can update setup progress"
+  on public.setup_wizard_progress;
+
+drop policy if exists "Members can delete setup progress"
+  on public.setup_wizard_progress;
+
+
+create policy "Members can read setup progress"
+on public.setup_wizard_progress
+for select
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can create setup progress"
+on public.setup_wizard_progress
+for insert
+to authenticated
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can update setup progress"
+on public.setup_wizard_progress
+for update
+to authenticated
+using (
+  public.is_household_member(household_id)
+)
+with check (
+  public.is_household_member(household_id)
+);
+
+
+create policy "Members can delete setup progress"
+on public.setup_wizard_progress
+for delete
+to authenticated
+using (
+  public.is_household_member(household_id)
+);
+
+
+-- ============================================================
+-- 14. ENSURE RLS REMAINS ENABLED
+-- ============================================================
+
+alter table public.profiles enable row level security;
+alter table public.households enable row level security;
+alter table public.household_members enable row level security;
+alter table public.properties enable row level security;
+alter table public.rooms enable row level security;
+alter table public.items enable row level security;
+alter table public.documents enable row level security;
+alter table public.reminders enable row level security;
+alter table public.maintenance_history enable row level security;
+alter table public.ai_insights enable row level security;
+alter table public.search_history enable row level security;
+alter table public.setup_wizard_progress enable row level security;
+
+commit;
