@@ -1,0 +1,476 @@
+begin;
+
+-- ============================================================
+-- SAFEHAVEN MIGRATION 016B2A
+-- Confidence-Scored Duplicate Item Detection
+-- ============================================================
+
+
+-- ============================================================
+-- 1. ENABLE FUZZY TEXT MATCHING
+--
+-- pg_trgm provides similarity scoring for item names.
+-- Supabase convention places extensions in the extensions schema.
+-- ============================================================
+
+create extension if not exists pg_trgm
+with schema extensions;
+
+
+-- ============================================================
+-- 2. DUPLICATE ITEM CHECK
+--
+-- Searches the household associated with the supplied property.
+--
+-- Score hierarchy:
+--   100 = exact serial number
+--    98 = exact brand + model + purchase date
+--    95 = exact brand + model
+--    90 = exact vendor + model
+--    85 = exact item name + room
+--    80 = exact item name + brand
+--   0–94 = weighted fuzzy match
+--
+-- p_exclude_item_id allows the frontend to check an existing
+-- item during editing without matching the item against itself.
+-- ============================================================
+
+create or replace function public.duplicate_item_check(
+  p_property_id uuid,
+  p_item_name text,
+  p_room_id uuid default null,
+  p_brand text default null,
+  p_model_number text default null,
+  p_serial_number text default null,
+  p_purchase_date date default null,
+  p_vendor text default null,
+  p_exclude_item_id uuid default null,
+  p_min_score integer default 60,
+  p_limit_count integer default 10
+)
+returns jsonb
+language plpgsql
+security definer
+stable
+set search_path = pg_catalog, public, extensions
+as $$
+declare
+  v_household_id uuid;
+  v_room_property_id uuid;
+
+  v_item_name text;
+  v_brand text;
+  v_model_number text;
+  v_serial_number text;
+  v_vendor text;
+
+  v_min_score integer;
+  v_limit integer;
+
+  v_matches jsonb;
+  v_match_count integer;
+  v_highest_score integer;
+begin
+  -- ==========================================================
+  -- 1. AUTHENTICATION AND PROPERTY ACCESS
+  -- ==========================================================
+
+  perform public.require_authenticated_user();
+
+  if p_property_id is null then
+    raise exception using
+      errcode = '22004',
+      message = 'Property ID is required.';
+  end if;
+
+  perform public.require_property_access(p_property_id);
+
+  select household_id
+  into v_household_id
+  from public.properties
+  where property_id = p_property_id;
+
+  if not found then
+    raise exception using
+      errcode = 'P0002',
+      message = 'Property not found.';
+  end if;
+
+
+  -- ==========================================================
+  -- 2. VALIDATE AND NORMALIZE INPUTS
+  -- ==========================================================
+
+  v_item_name := nullif(lower(btrim(p_item_name)), '');
+  v_brand := nullif(lower(btrim(p_brand)), '');
+  v_model_number := nullif(lower(btrim(p_model_number)), '');
+  v_serial_number := nullif(lower(btrim(p_serial_number)), '');
+  v_vendor := nullif(lower(btrim(p_vendor)), '');
+
+  if v_item_name is null then
+    raise exception using
+      errcode = '22023',
+      message = 'Item name is required.';
+  end if;
+
+  v_min_score :=
+    least(
+      greatest(coalesce(p_min_score, 60), 0),
+      100
+    );
+
+  v_limit :=
+    least(
+      greatest(coalesce(p_limit_count, 10), 1),
+      25
+    );
+
+
+  -- ==========================================================
+  -- 3. VALIDATE OPTIONAL ROOM
+  -- ==========================================================
+
+  if p_room_id is not null then
+    select property_id
+    into v_room_property_id
+    from public.rooms
+    where room_id = p_room_id;
+
+    if not found then
+      raise exception using
+        errcode = 'P0002',
+        message = 'Room not found.';
+    end if;
+
+    if v_room_property_id <> p_property_id then
+      raise exception using
+        errcode = '22023',
+        message = 'The selected room does not belong to the selected property.';
+    end if;
+  end if;
+
+
+  -- ==========================================================
+  -- 4. SCORE POSSIBLE DUPLICATES
+  -- ==========================================================
+
+  with candidate_base as (
+    select
+      i.item_id,
+      i.property_id,
+      p.property_name,
+      i.room_id,
+      r.room_name,
+      i.item_name,
+      i.category,
+      i.brand,
+      i.model_number,
+      i.serial_number,
+      i.purchase_date,
+      i.purchase_price,
+      i.vendor,
+      i.primary_photo_url,
+      i.created_at,
+      i.updated_at,
+
+      extensions.similarity(
+        lower(i.item_name),
+        v_item_name
+      ) as name_similarity,
+
+      (
+        v_brand is not null
+        and lower(coalesce(i.brand, '')) = v_brand
+      ) as brand_match,
+
+      (
+        v_model_number is not null
+        and lower(coalesce(i.model_number, '')) = v_model_number
+      ) as model_match,
+
+      (
+        v_serial_number is not null
+        and lower(coalesce(i.serial_number, '')) = v_serial_number
+      ) as serial_match,
+
+      (
+        v_vendor is not null
+        and lower(coalesce(i.vendor, '')) = v_vendor
+      ) as vendor_match,
+
+      (
+        p_purchase_date is not null
+        and i.purchase_date = p_purchase_date
+      ) as purchase_date_match,
+
+      (
+        p_room_id is not null
+        and i.room_id = p_room_id
+      ) as room_match,
+
+      (
+        lower(i.item_name) = v_item_name
+      ) as exact_name_match
+
+    from public.items i
+
+    join public.properties p
+      on p.property_id = i.property_id
+
+    left join public.rooms r
+      on r.room_id = i.room_id
+
+    where i.household_id = v_household_id
+      and i.is_deleted = false
+      and (
+        p_exclude_item_id is null
+        or i.item_id <> p_exclude_item_id
+      )
+  ),
+
+  scored_candidates as (
+    select
+      candidate_base.*,
+
+      case
+        -- Exact identifiers provide the strongest confidence.
+
+        when serial_match then
+          100
+
+        when brand_match
+         and model_match
+         and purchase_date_match then
+          98
+
+        when brand_match
+         and model_match then
+          95
+
+        when vendor_match
+         and model_match then
+          90
+
+        when exact_name_match
+         and room_match then
+          85
+
+        when exact_name_match
+         and brand_match then
+          80
+
+        else
+          least(
+            94,
+            greatest(
+              0,
+              round(
+                (name_similarity * 60)
+                + case when brand_match then 15 else 0 end
+                + case when model_match then 20 else 0 end
+                + case when room_match then 5 else 0 end
+                + case when vendor_match then 5 else 0 end
+                + case when purchase_date_match then 5 else 0 end
+              )::integer
+            )
+          )
+      end as confidence_score
+
+    from candidate_base
+  ),
+
+  matching_candidates as (
+    select
+      *,
+      case
+        when confidence_score >= 95
+          then 'almost_certain'
+        when confidence_score >= 80
+          then 'very_likely'
+        when confidence_score >= 60
+          then 'possible'
+        else 'unlikely'
+      end as confidence_level,
+
+      concat_ws(
+        ', ',
+        case
+          when serial_match
+            then 'Exact serial number match'
+        end,
+        case
+          when brand_match
+            then 'Brand match'
+        end,
+        case
+          when model_match
+            then 'Model number match'
+        end,
+        case
+          when vendor_match
+            then 'Vendor match'
+        end,
+        case
+          when purchase_date_match
+            then 'Purchase date match'
+        end,
+        case
+          when exact_name_match
+            then 'Exact item name match'
+          when name_similarity >= 0.70
+            then 'Strong item name similarity'
+          when name_similarity >= 0.40
+            then 'Partial item name similarity'
+        end,
+        case
+          when room_match
+            then 'Same room'
+        end
+      ) as match_reason
+
+    from scored_candidates
+    where confidence_score >= v_min_score
+  ),
+
+  limited_matches as (
+    select *
+    from matching_candidates
+    order by
+      confidence_score desc,
+      name_similarity desc,
+      updated_at desc,
+      item_id
+    limit v_limit
+  )
+
+  select
+    coalesce(
+      jsonb_agg(
+        jsonb_build_object(
+          'item_id', item_id,
+          'property_id', property_id,
+          'property_name', property_name,
+          'room_id', room_id,
+          'room_name', room_name,
+          'item_name', item_name,
+          'category', category,
+          'brand', brand,
+          'model_number', model_number,
+          'serial_number', serial_number,
+          'purchase_date', purchase_date,
+          'purchase_price', purchase_price,
+          'vendor', vendor,
+          'primary_photo_url', primary_photo_url,
+          'confidence_score', confidence_score,
+          'confidence_level', confidence_level,
+          'match_reason',
+            coalesce(
+              nullif(match_reason, ''),
+              'General item similarity'
+            ),
+          'signals', jsonb_build_object(
+            'serial_match', serial_match,
+            'brand_match', brand_match,
+            'model_match', model_match,
+            'vendor_match', vendor_match,
+            'purchase_date_match', purchase_date_match,
+            'exact_name_match', exact_name_match,
+            'room_match', room_match,
+            'name_similarity',
+              round(name_similarity::numeric, 3)
+          ),
+          'created_at', created_at,
+          'updated_at', updated_at
+        )
+        order by
+          confidence_score desc,
+          name_similarity desc,
+          updated_at desc
+      ),
+      '[]'::jsonb
+    ),
+
+    count(*)::integer,
+
+    coalesce(max(confidence_score), 0)
+
+  into
+    v_matches,
+    v_match_count,
+    v_highest_score
+
+  from limited_matches;
+
+
+  -- ==========================================================
+  -- 5. STANDARDIZED JSON RESPONSE
+  -- ==========================================================
+
+  return jsonb_build_object(
+    'success', true,
+    'message',
+      case
+        when v_match_count = 0 then
+          'No likely duplicate items found.'
+        when v_highest_score >= 95 then
+          'An almost certain duplicate was found.'
+        when v_highest_score >= 80 then
+          'A very likely duplicate was found.'
+        else
+          'Possible duplicate items were found.'
+      end,
+    'duplicate_found', v_match_count > 0,
+    'highest_score', v_highest_score,
+    'count', v_match_count,
+    'minimum_score', v_min_score,
+    'input', jsonb_build_object(
+      'property_id', p_property_id,
+      'room_id', p_room_id,
+      'item_name', p_item_name,
+      'brand', p_brand,
+      'model_number', p_model_number,
+      'serial_number', p_serial_number,
+      'purchase_date', p_purchase_date,
+      'vendor', p_vendor,
+      'excluded_item_id', p_exclude_item_id
+    ),
+    'data', v_matches
+  );
+end;
+$$;
+
+
+-- ============================================================
+-- 3. FUNCTION PERMISSIONS
+-- ============================================================
+
+revoke all on function public.duplicate_item_check(
+  uuid,
+  text,
+  uuid,
+  text,
+  text,
+  text,
+  date,
+  text,
+  uuid,
+  integer,
+  integer
+) from public;
+
+grant execute on function public.duplicate_item_check(
+  uuid,
+  text,
+  uuid,
+  text,
+  text,
+  text,
+  date,
+  text,
+  uuid,
+  integer,
+  integer
+) to authenticated;
+
+
+commit;
