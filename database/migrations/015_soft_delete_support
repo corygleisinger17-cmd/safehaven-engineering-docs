@@ -1,0 +1,99 @@
+begin;
+
+-- ============================================================
+-- SAFEHAVEN MIGRATION 015
+-- Soft Delete Support for Inventory Items
+-- ============================================================
+
+
+-- ============================================================
+-- 1. ADD SOFT-DELETE COLUMNS
+-- ============================================================
+
+alter table public.items
+  add column if not exists is_deleted boolean not null default false,
+  add column if not exists deleted_at timestamptz,
+  add column if not exists deleted_by uuid;
+
+
+-- ============================================================
+-- 2. ADD USER REFERENCE
+--
+-- If the user account is later removed, preserve the deleted
+-- item record but clear the deleted_by value.
+-- ============================================================
+
+alter table public.items
+  drop constraint if exists items_deleted_by_fkey;
+
+alter table public.items
+  add constraint items_deleted_by_fkey
+  foreign key (deleted_by)
+  references public.profiles(profile_id)
+  on delete set null;
+
+
+-- ============================================================
+-- 3. KEEP SOFT-DELETE VALUES CONSISTENT
+--
+-- Active item:
+--   is_deleted = false
+--   deleted_at = null
+--   deleted_by = null
+--
+-- Deleted item:
+--   is_deleted = true
+--   deleted_at is populated
+-- ============================================================
+
+alter table public.items
+  drop constraint if exists items_soft_delete_consistency_check;
+
+alter table public.items
+  add constraint items_soft_delete_consistency_check
+  check (
+    (
+      is_deleted = false
+      and deleted_at is null
+      and deleted_by is null
+    )
+    or
+    (
+      is_deleted = true
+      and deleted_at is not null
+    )
+  );
+
+
+-- ============================================================
+-- 4. INDEX ACTIVE ITEMS
+--
+-- Most SafeHaven queries will only display active items.
+-- This partial index keeps those queries efficient.
+-- ============================================================
+
+create index if not exists idx_items_active_property
+  on public.items(property_id, created_at desc)
+  where is_deleted = false;
+
+create index if not exists idx_items_active_room
+  on public.items(room_id, created_at desc)
+  where is_deleted = false;
+
+create index if not exists idx_items_active_household
+  on public.items(household_id, created_at desc)
+  where is_deleted = false;
+
+
+-- ============================================================
+-- 5. INDEX DELETED ITEMS
+--
+-- Supports a future Recycle Bin view.
+-- ============================================================
+
+create index if not exists idx_items_deleted_household
+  on public.items(household_id, deleted_at desc)
+  where is_deleted = true;
+
+
+commit;
