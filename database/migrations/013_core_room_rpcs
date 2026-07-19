@@ -1,0 +1,376 @@
+begin;
+
+-- ============================================================
+-- SAFEHAVEN MIGRATION 013
+-- Core Room RPC Functions
+-- ============================================================
+
+
+-- ============================================================
+-- 1. CREATE ROOM
+-- Any authenticated household member with property access
+-- may create a room.
+-- ============================================================
+
+create or replace function public.create_room(
+  p_property_id uuid,
+  p_room_name text,
+  p_room_type text default null,
+  p_photo_url text default null
+)
+returns public.rooms
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_room public.rooms;
+begin
+  if auth.uid() is null then
+    raise exception using
+      errcode = '42501',
+      message = 'Authentication is required.';
+  end if;
+
+  if p_property_id is null then
+    raise exception using
+      errcode = '22004',
+      message = 'Property ID is required.';
+  end if;
+
+  if not exists (
+    select 1
+    from public.properties
+    where property_id = p_property_id
+  ) then
+    raise exception using
+      errcode = 'P0002',
+      message = 'Property not found.';
+  end if;
+
+  if not public.is_property_member(p_property_id) then
+    raise exception using
+      errcode = '42501',
+      message = 'You are not authorized to create rooms for this property.';
+  end if;
+
+  if p_room_name is null
+     or length(btrim(p_room_name)) = 0 then
+    raise exception using
+      errcode = '22023',
+      message = 'Room name is required.';
+  end if;
+
+  if exists (
+    select 1
+    from public.rooms
+    where property_id = p_property_id
+      and lower(btrim(room_name)) = lower(btrim(p_room_name))
+  ) then
+    raise exception using
+      errcode = '23505',
+      message = 'A room with this name already exists in the property.';
+  end if;
+
+  insert into public.rooms (
+    property_id,
+    room_name,
+    room_type,
+    photo_url
+  )
+  values (
+    p_property_id,
+    btrim(p_room_name),
+    nullif(lower(btrim(p_room_type)), ''),
+    nullif(btrim(p_photo_url), '')
+  )
+  returning *
+  into v_room;
+
+  return v_room;
+end;
+$$;
+
+
+-- ============================================================
+-- 2. UPDATE ROOM
+-- Household members with property access may update a room.
+-- ============================================================
+
+create or replace function public.update_room(
+  p_room_id uuid,
+  p_room_name text,
+  p_room_type text default null,
+  p_photo_url text default null
+)
+returns public.rooms
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_property_id uuid;
+  v_room public.rooms;
+begin
+  if auth.uid() is null then
+    raise exception using
+      errcode = '42501',
+      message = 'Authentication is required.';
+  end if;
+
+  if p_room_id is null then
+    raise exception using
+      errcode = '22004',
+      message = 'Room ID is required.';
+  end if;
+
+  select property_id
+  into v_property_id
+  from public.rooms
+  where room_id = p_room_id;
+
+  if v_property_id is null then
+    raise exception using
+      errcode = 'P0002',
+      message = 'Room not found.';
+  end if;
+
+  if not public.is_property_member(v_property_id) then
+    raise exception using
+      errcode = '42501',
+      message = 'You are not authorized to update this room.';
+  end if;
+
+  if p_room_name is null
+     or length(btrim(p_room_name)) = 0 then
+    raise exception using
+      errcode = '22023',
+      message = 'Room name is required.';
+  end if;
+
+  if exists (
+    select 1
+    from public.rooms
+    where property_id = v_property_id
+      and room_id <> p_room_id
+      and lower(btrim(room_name)) = lower(btrim(p_room_name))
+  ) then
+    raise exception using
+      errcode = '23505',
+      message = 'Another room with this name already exists in the property.';
+  end if;
+
+  update public.rooms
+  set
+    room_name = btrim(p_room_name),
+    room_type = nullif(lower(btrim(p_room_type)), ''),
+    photo_url = nullif(btrim(p_photo_url), '')
+  where room_id = p_room_id
+  returning *
+  into v_room;
+
+  return v_room;
+end;
+$$;
+
+
+-- ============================================================
+-- 3. DELETE ROOM
+-- Household owners and admins may delete rooms.
+--
+-- Existing items assigned to the room will remain in the
+-- property and their room_id will become NULL according to the
+-- current foreign-key rule.
+-- ============================================================
+
+create or replace function public.delete_room(
+  p_room_id uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_household_id uuid;
+  v_authorized boolean;
+begin
+  if auth.uid() is null then
+    raise exception using
+      errcode = '42501',
+      message = 'Authentication is required.';
+  end if;
+
+  if p_room_id is null then
+    raise exception using
+      errcode = '22004',
+      message = 'Room ID is required.';
+  end if;
+
+  select p.household_id
+  into v_household_id
+  from public.rooms r
+  join public.properties p
+    on p.property_id = r.property_id
+  where r.room_id = p_room_id;
+
+  if v_household_id is null then
+    raise exception using
+      errcode = 'P0002',
+      message = 'Room not found.';
+  end if;
+
+  select exists (
+    select 1
+    from public.household_members hm
+    where hm.household_id = v_household_id
+      and hm.user_id = auth.uid()
+      and hm.invite_status = 'accepted'
+      and hm.role in ('owner', 'admin')
+  )
+  into v_authorized;
+
+  if not v_authorized then
+    raise exception using
+      errcode = '42501',
+      message = 'Only household owners or admins may delete rooms.';
+  end if;
+
+  delete from public.rooms
+  where room_id = p_room_id;
+
+  return found;
+end;
+$$;
+
+
+-- ============================================================
+-- 4. CREATE DEFAULT ROOMS
+--
+-- Adds a practical standard room set while skipping names that
+-- already exist. The operation is safe to run more than once.
+-- ============================================================
+
+create or replace function public.create_default_rooms(
+  p_property_id uuid
+)
+returns setof public.rooms
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+  if auth.uid() is null then
+    raise exception using
+      errcode = '42501',
+      message = 'Authentication is required.';
+  end if;
+
+  if p_property_id is null then
+    raise exception using
+      errcode = '22004',
+      message = 'Property ID is required.';
+  end if;
+
+  if not exists (
+    select 1
+    from public.properties
+    where property_id = p_property_id
+  ) then
+    raise exception using
+      errcode = 'P0002',
+      message = 'Property not found.';
+  end if;
+
+  if not public.is_property_member(p_property_id) then
+    raise exception using
+      errcode = '42501',
+      message = 'You are not authorized to create rooms for this property.';
+  end if;
+
+  return query
+  with default_rooms(room_name, room_type) as (
+    values
+      ('Kitchen', 'kitchen'),
+      ('Living Room', 'living_room'),
+      ('Primary Bedroom', 'bedroom'),
+      ('Bedroom', 'bedroom'),
+      ('Bathroom', 'bathroom'),
+      ('Laundry Room', 'laundry'),
+      ('Garage', 'garage'),
+      ('Basement', 'basement')
+  ),
+  inserted_rooms as (
+    insert into public.rooms (
+      property_id,
+      room_name,
+      room_type
+    )
+    select
+      p_property_id,
+      d.room_name,
+      d.room_type
+    from default_rooms d
+    where not exists (
+      select 1
+      from public.rooms r
+      where r.property_id = p_property_id
+        and lower(btrim(r.room_name)) =
+            lower(btrim(d.room_name))
+    )
+    returning *
+  )
+  select *
+  from inserted_rooms
+  order by room_name;
+end;
+$$;
+
+
+-- ============================================================
+-- 5. FUNCTION PERMISSIONS
+-- ============================================================
+
+revoke all on function public.create_room(
+  uuid,
+  text,
+  text,
+  text
+) from public;
+
+revoke all on function public.update_room(
+  uuid,
+  text,
+  text,
+  text
+) from public;
+
+revoke all on function public.delete_room(uuid)
+from public;
+
+revoke all on function public.create_default_rooms(uuid)
+from public;
+
+
+grant execute on function public.create_room(
+  uuid,
+  text,
+  text,
+  text
+) to authenticated;
+
+grant execute on function public.update_room(
+  uuid,
+  text,
+  text,
+  text
+) to authenticated;
+
+grant execute on function public.delete_room(uuid)
+to authenticated;
+
+grant execute on function public.create_default_rooms(uuid)
+to authenticated;
+
+
+commit;
