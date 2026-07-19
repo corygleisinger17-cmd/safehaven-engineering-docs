@@ -1,1 +1,79 @@
+begin;
 
+-- ============================================================
+-- SAFEHAVEN MIGRATION 010
+-- Performance and Index Optimization
+-- ============================================================
+
+
+-- ============================================================
+-- 1. MISSING FOREIGN-KEY INDEXES
+-- ============================================================
+
+create index if not exists idx_ai_insights_item
+  on public.ai_insights (item_id);
+
+create index if not exists idx_maintenance_household
+  on public.maintenance_history (household_id);
+
+create index if not exists idx_maintenance_reminder
+  on public.maintenance_history (reminder_id);
+
+create index if not exists idx_search_history_household
+  on public.search_history (household_id);
+
+create index if not exists idx_setup_wizard_property
+  on public.setup_wizard_progress (property_id);
+
+create index if not exists idx_setup_wizard_item
+  on public.setup_wizard_progress (item_id);
+
+
+-- ============================================================
+-- 2. HIGH-VALUE APPLICATION QUERY INDEXES
+-- ============================================================
+
+-- Dashboard and maintenance page:
+-- household reminders filtered by status and ordered by due date.
+create index if not exists idx_reminders_household_status_due
+  on public.reminders (household_id, status, due_date);
+
+
+-- Property inventory pages:
+-- items belonging to a household and property.
+create index if not exists idx_items_household_property
+  on public.items (household_id, property_id);
+
+
+-- Room inventory views:
+-- items belonging to a specific household room.
+create index if not exists idx_items_household_room
+  on public.items (household_id, room_id);
+
+
+-- Document filtering by household and document category.
+create index if not exists idx_documents_household_type
+  on public.documents (household_id, document_type);
+
+
+-- AI dashboard cards filtered by household and status.
+create index if not exists idx_ai_insights_household_status
+  on public.ai_insights (household_id, status);
+
+
+-- Private user search history scoped to household.
+create index if not exists idx_search_history_user_household
+  on public.search_history (user_id, household_id);
+
+
+-- Maintenance records displayed per household and item.
+create index if not exists idx_maintenance_household_item
+  on public.maintenance_history (household_id, item_id);
+
+
+-- Setup progress displayed for a property within a household.
+create index if not exists idx_setup_wizard_household_property
+  on public.setup_wizard_progress (household_id, property_id);
+
+
+commit;
