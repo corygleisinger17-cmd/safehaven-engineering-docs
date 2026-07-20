@@ -41,3 +41,56 @@ create table if not exists public.item_intelligence (
             or classification_confidence between 0 and 100
         )
 );
+
+
+--------------------------------------------------------------------------------
+-- Step 2: Documentation
+--------------------------------------------------------------------------------
+
+COMMENT ON TABLE public.item_intelligence IS
+'Stores SafeHaven''s current knowledge about an inventory item. This table links user-entered inventory to the SafeHaven reference knowledge base.';
+
+COMMENT ON COLUMN public.item_intelligence.item_intelligence_id IS
+'Primary key for the item intelligence record.';
+
+COMMENT ON COLUMN public.item_intelligence.item_id IS
+'Reference to the inventory item being classified. One intelligence record exists per item.';
+
+COMMENT ON COLUMN public.item_intelligence.manufacturer_id IS
+'Reference to the recognized manufacturer from the SafeHaven reference library.';
+
+COMMENT ON COLUMN public.item_intelligence.item_type_id IS
+'Reference to the recognized item type from the SafeHaven reference library.';
+
+COMMENT ON COLUMN public.item_intelligence.classification_confidence IS
+'Confidence score (0-100) indicating how certain SafeHaven is about the classification.';
+
+COMMENT ON COLUMN public.item_intelligence.classified_at IS
+'Timestamp when the current classification was assigned.';
+
+COMMENT ON COLUMN public.item_intelligence.created_at IS
+'Timestamp when this intelligence record was created.';
+
+COMMENT ON COLUMN public.item_intelligence.updated_at IS
+'Timestamp when this intelligence record was last updated.';
+
+
+--------------------------------------------------------------------------------
+-- Step 3: Performance Indexes
+--------------------------------------------------------------------------------
+
+-- Fast lookup by inventory item
+CREATE INDEX IF NOT EXISTS idx_item_intelligence_item_id
+ON public.item_intelligence (item_id);
+
+-- Fast lookup by manufacturer
+CREATE INDEX IF NOT EXISTS idx_item_intelligence_manufacturer_id
+ON public.item_intelligence (manufacturer_id);
+
+-- Fast lookup by item type
+CREATE INDEX IF NOT EXISTS idx_item_intelligence_item_type_id
+ON public.item_intelligence (item_type_id);
+
+-- Fast lookup by confidence
+CREATE INDEX IF NOT EXISTS idx_item_intelligence_confidence
+ON public.item_intelligence (classification_confidence);
