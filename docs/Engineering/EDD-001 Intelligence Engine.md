@@ -152,7 +152,7 @@ The Intelligence Engine shall:
 
 The engine shall NOT:
 
-✗ Modify database records
+✗ Modify accepted item classification directly
 
 ✗ Automatically classify items
 
