@@ -260,7 +260,7 @@ classify_item()
 
 approve_suggestion()
 
-create_inventory_item()
+create_Asset _item()
 
 archive_item()
 ```
@@ -295,11 +295,11 @@ Responsible for:
 
 ---
 
-## Inventory
+## Asset 
 
 Responsible for:
 
-- Inventory Items
+- Asset  Items
 - Categories
 - Locations
 - Ownership
@@ -376,7 +376,7 @@ Household
     │
     ├── Members
     │
-    ├── Inventory
+    ├── Asset 
     │
     ├── Documents
     │
