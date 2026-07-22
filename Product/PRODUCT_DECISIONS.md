@@ -136,7 +136,7 @@ The user should not retype this information.
 
 ### Decision
 
-Every uploaded document should eventually be associated with an inventory item.
+Every uploaded document should eventually be associated with an Asset.
 
 ### Document Types
 
